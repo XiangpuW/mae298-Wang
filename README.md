@@ -13,6 +13,6 @@ Step 4: Active emv py_OFA, install Aviary, pyoptsparse, cyipopt. (There may be s
         mamba install -c conda-forge cyipopt
 Step 5: Check all the packages by typing the following command one by one: pip show openvsp, pip show pyFlightscript, pip show aviary, pip show openMADAO, pip show pyoptsparse, pip show                cyipopt.
 
-Workflow one: Use FlightStream to generate aero_polar and load back.
+Workflow one: Use FlightStream to generate aero_polar and load back. See Polar_FS_Comp folder.
 
-Workflow two: Use FlightStream as a external aerodynamic solver and combine it into a optimization loop.
+Workflow two: Use FlightStream as a external aerodynamic solver and combine it into a optimization loop. See External_FS_Comp folder.
