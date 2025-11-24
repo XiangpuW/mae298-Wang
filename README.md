@@ -4,7 +4,6 @@ Extra CFD solver: FlightStream 2025.1
 AI statement: These codes are generated with the assistance of ChatGPT 5.1
 
 Tech setup for this version: Please follow the steps in the order listed.
-
 1. Install the OpenVSO API. This will create a environment (default env name: vsppytools), and you need a version with a Python version higher than 3.9.
 2. Active env vsppytools, then install pyFlightscript, make sure you have FlighStream GUI installed and working.
 3. Colone env vsppytools with a new name (you can pick one you want, for example: py_OFA) in case of package conflicts.
