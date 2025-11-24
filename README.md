@@ -4,6 +4,7 @@ Extra CFD solver: FlightStream
 
 Tech setup for this version:
 Please follow the order of the steps listed.
+
 Step 1: Install the OpenVSO API. This will create a environment (default env name: vsppytools), and you need a version with a Python version higher than 3.9.
 
 Step 2: Active env vsppytools, then install pyFlightscript, make sure you have FlighStream GUI installed and working.
