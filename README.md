@@ -14,5 +14,10 @@ Step 4: Active emv py_OFA, install Aviary, pyoptsparse, cyipopt. (There may be s
 Step 5: Check all the packages by typing the following command one by one: pip show openvsp, pip show pyFlightscript, pip show aviary, pip show openMADAO, pip show pyoptsparse, pip show                cyipopt.
 
 Workflow one: Use FlightStream to generate aero_polar and load back. See Polar_FS_Comp folder.
+1. Save these files to your Aviray file in a suitable place. (Eg: C/User/Aviary/Subsystem/Aerodynamics/FlightStream_based)
+2. Update several file paths in GeometryCreator.py, FSpolarAeroComp.py, geo_oas_opt_FSpolar.py
+3. Run GeometryCreator.py first to generate a CAD model for FLightStream.
+4. Run FSpolarAeroComp.py to generate a high-fidelity aerodynamics polar.
+5. Run FSpolarAeroComp.py, which is already combined with Geometry Optimization.
 
 Workflow two: Use FlightStream as a external aerodynamic solver and combine it into a optimization loop. See External_FS_Comp folder.
