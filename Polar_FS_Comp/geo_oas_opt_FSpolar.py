@@ -9,50 +9,60 @@ import openmdao.api as om
 import aviary.api as av
 import pandas as pd
 
+#====Cost
+from aviary.interface import reports as av_reports
+def _dummy_input_check_report(*args, **kwargs):
+    return
+av_reports.input_check_report = _dummy_input_check_report
+
+from jet_cost_builder import JetCostBuilder
+from jet_cost_variables import Aircraft
+#==================
+
 # Allow for user overrides here, add the FlightStream polar data
 # Path to your aircraft definition file
 aircraft_filename = r"C:\Users\AA201\Aviary\aviary\subsystems\aerodynamics\FlightStream_based\advanced_single_aisle_FLOPS.csv"
-optimizer = 'SLSQP'
+optimizer = 'IPOPT'
 make_plots = True
 max_iter = 100
 
 
-# 你的 FS 极谱 npz 路径
+# Leave your FS polar file (.npz) path
 fs_npz_path = r"C:\Users\AA201\Aviary\aviary\subsystems\aerodynamics\FlightStream_based\fs_polar_output\fs_asa_polar.npz"
 
 def build_tabular_from_fs(fs_npz_path, alt_target_ft=35000.0, n_CL=25):
     """
-    从 FlightStream 极谱 fs_asa_polar.npz 自动构造 Aviary Tabular Aero
-    需要的 NamedValues: CD0_data 和 CDI_data。
+    From FlightStream polar fs_asa_polar.npz automatically construct Aviary Tabular Aero
+    required NamedValues: CD0_data and CDI_data.
     - CD0: altitude, mach -> zero_lift_drag_coefficient
     - CDI: mach, CL -> lift_dependent_drag_coefficient
     """
 
     fs_npz = np.load(fs_npz_path)
 
-    # 读原始极谱
+    # Read original data
     alt_grid_m   = np.asarray(fs_npz["alt_grid"]).reshape(-1)      # (n_alt,)
     mach_grid    = np.asarray(fs_npz["mach_grid"]).reshape(-1)     # (n_mach,)
     alpha_grid   = np.asarray(fs_npz["alpha_grid"]).reshape(-1)    # (n_alpha,)
     CL_tab       = np.asarray(fs_npz["CL_tab"])
     CD_tab       = np.asarray(fs_npz["CD_tab"])
 
-    # 单位转换：m -> ft
+    # Unit conversion: m -> ft
     alt_grid_ft = alt_grid_m / 0.3048
 
     n_alt   = alt_grid_ft.size
     n_mach  = mach_grid.size
     n_alpha = alpha_grid.size
 
-    # 安全检查
+    # Safety check
     expected_shape = (n_alt, n_mach, n_alpha)
     if CL_tab.shape != expected_shape or CD_tab.shape != expected_shape:
         raise RuntimeError(
-            f"FS 极谱维度不对: CL_tab.shape={CL_tab.shape}, "
-            f"预期={expected_shape} (n_alt, n_mach, n_alpha)"
+            f"FS polar dimensions mismatch: CL_tab.shape={CL_tab.shape}, "
+            f"expected={expected_shape} (n_alt, n_mach, n_alpha)"
         )
 
-    # ========== 1) 计算 CD0(alt, mach) ==========
+    # ========== 1) Calculate CD0(alt, mach) ==========
     CD0_table = np.zeros((n_alt, n_mach))
 
     for i in range(n_alt):
@@ -60,33 +70,33 @@ def build_tabular_from_fs(fs_npz_path, alt_target_ft=35000.0, n_CL=25):
             CL_line = CL_tab[i, j, :]
             CD_line = CD_tab[i, j, :]
 
-            # CL 跨过 0 的情况：插值到 CL=0
+            # CL crosses 0: interpolate to CL=0
             if (CL_line.min() <= 0.0) and (CL_line.max() >= 0.0):
                 CD0_ij = np.interp(0.0, CL_line, CD_line)
-            else:  # 不跨 0：取 |CL| 最小的点
+            else:  # Does not cross 0: take point with smallest |CL|
                 idx_min = np.argmin(np.abs(CL_line))
                 CD0_ij = CD_line[idx_min]
 
             CD0_table[i, j] = CD0_ij
 
-    # 把 (alt, mach) 网格展开成一维样本
+    # Flatten (alt, mach) grid into 1D samples
     ALT_2D, MACH_2D = np.meshgrid(alt_grid_ft, mach_grid, indexing='ij')  # (n_alt, n_mach)
     alt_samples  = ALT_2D.ravel()           # (n_alt*n_mach,)
     mach_samples = MACH_2D.ravel()          # (n_alt*n_mach,)
     cd0_samples  = CD0_table.ravel()        # (n_alt*n_mach,)
 
-    # ---- 生成 CD0_data ----
+    # ---- Generate CD0_data ----
     CD0_data = av.NamedValues()
     CD0_data.set_val('altitude', alt_samples,  units='ft')
     CD0_data.set_val('mach',     mach_samples, units='unitless')
     CD0_data.set_val('zero_lift_drag_coefficient',
                      cd0_samples,              units='unitless')
 
-    # ========== 2) 计算 CDI(mach, CL) ==========
-    # 选一个代表高度（默认 35,000 ft）做升力相关阻力
+    # ========== 2) Calculate CDI(mach, CL) ==========
+    # Select a representative altitude (default 35,000 ft) for lift-dependent drag
     i_ref = int(np.argmin(np.abs(alt_grid_ft - alt_target_ft)))
 
-    # 找所有 Mach 下共同的 CL 范围
+    # Find common CL range across all Mach numbers
     CL_min_list = []
     CL_max_list = []
     for j in range(n_mach):
@@ -97,7 +107,7 @@ def build_tabular_from_fs(fs_npz_path, alt_target_ft=35000.0, n_CL=25):
     CL_min = max(CL_min_list)
     CL_max = min(CL_max_list)
 
-    # 在公共范围内建一个统一的 CL 网格
+    # Build a unified CL grid within the common range
     CL_grid = np.linspace(CL_min, CL_max, n_CL)
 
     # CDI_table: (n_mach, n_CL)
@@ -107,26 +117,26 @@ def build_tabular_from_fs(fs_npz_path, alt_target_ft=35000.0, n_CL=25):
         CL_line = CL_tab[i_ref, j, :]
         CD_line = CD_tab[i_ref, j, :]
 
-        # 对当前 Mach 下代表高度的 CD0
+        # For current Mach at representative altitude, find CD0
         if (CL_line.min() <= 0.0) and (CL_line.max() >= 0.0):
             CD0_ref = np.interp(0.0, CL_line, CD_line)
         else:
             idx_min = np.argmin(np.abs(CL_line))
             CD0_ref = CD_line[idx_min]
 
-        # 升力相关阻力: CDi(CL) = CD(CL) - CD0_ref
+        # Lift-dependent drag: CDi(CL) = CD(CL) - CD0_ref
         CDi_line = CD_line - CD0_ref
 
-        # 插值到统一的 CL_grid
+        # Interpolate to unified CL_grid
         CDI_table[j, :] = np.interp(CL_grid, CL_line, CDi_line)
 
-    # 展开成一维样本 (mach, CL, CDi)
+    # Flatten into 1D samples (mach, CL, CDi)
     MACH_2D, CL_2D = np.meshgrid(mach_grid, CL_grid, indexing='ij')   # (n_mach, n_CL)
     mach_cdi_samples = MACH_2D.ravel()         # (n_mach*n_CL,)
     CL_samples       = CL_2D.ravel()
     cdi_samples      = CDI_table.ravel()
 
-    # ---- 生成 CDI_data ----
+    # ---- Generate CDI_data ----
     CDI_data = av.NamedValues()
     CDI_data.set_val('mach', mach_cdi_samples, units='unitless')
     CDI_data.set_val('lift_coefficient', CL_samples, units='unitless')
@@ -135,12 +145,16 @@ def build_tabular_from_fs(fs_npz_path, alt_target_ft=35000.0, n_CL=25):
 
     return CD0_data, CDI_data, cd0_samples, cdi_samples
 
-# 调用一次，得到供后面 phase_info 使用的 NamedValues
+# Call once to get NamedValues for later phase_info use
 CD0_data, CDI_data, cd0_samples, cdi_samples = build_tabular_from_fs(fs_npz_path)
 
 # Define mission phases and their options
 phase_info = {
-    'pre_mission': {'include_takeoff': False, 'optimize_mass': True},
+    'pre_mission': {
+        'include_takeoff': False,
+        'optimize_mass': True
+    },
+
     'climb_1': {
         'subsystem_options': {'core_aerodynamics': {'method': 'tabular',
                                                     'CD0_data': CD0_data,
@@ -150,22 +164,30 @@ phase_info = {
         'user_options': {
             'num_segments': 5,
             'order': 3,
+
+            # Optimization turned OFF
             'mach_optimize': False,
             'mach_polynomial_order': 1,
             'mach_initial': (0.2, 'unitless'),
             'mach_final': (0.72, 'unitless'),
-            'mach_bounds': ((0.18, 0.84), 'unitless'),
+            'mach_bounds': ((0.18, 0.74), 'unitless'),
+
             'altitude_optimize': False,
             'altitude_polynomial_order': 1,
             'altitude_initial': (0.0, 'ft'),
-            'altitude_final': (32500.0, 'ft'),
-            'altitude_bounds': ((0.0, 33000.0), 'ft'),
+            'altitude_final': (30500.0, 'ft'),
+            'altitude_bounds': ((0.0, 31000.0), 'ft'),
+
             'throttle_enforcement': 'path_constraint',
+
             'time_initial_bounds': ((0.0, 0.0), 'min'),
-            'time_duration_bounds': ((35.0, 105.0), 'min'),
+            'time_duration_bounds': ((27.0, 81.0), 'min'),
         },
-        'initial_guesses': {'time': ([0, 70], 'min')},
+        'initial_guesses': {
+            'time': ([0.0, 54.0], 'min')
+        },
     },
+
     'cruise': {
         'subsystem_options': {'core_aerodynamics': {'method': 'tabular',
                                                     'CD0_data': CD0_data,
@@ -175,22 +197,31 @@ phase_info = {
         'user_options': {
             'num_segments': 5,
             'order': 3,
+
+            # Optimization turned OFF
             'mach_optimize': False,
             'mach_polynomial_order': 1,
             'mach_initial': (0.72, 'unitless'),
-            'mach_final': (0.80, 'unitless'),
-            'mach_bounds': ((0.7, 0.84), 'unitless'),
+            'mach_final': (0.72, 'unitless'),
+            'mach_bounds': ((0.7, 0.8), 'unitless'),
+
+            # Optimization turned OFF
             'altitude_optimize': False,
             'altitude_polynomial_order': 1,
-            'altitude_initial': (32500.0, 'ft'),
-            'altitude_final': (36000.0, 'ft'),
-            'altitude_bounds': ((32000.0, 36500.0), 'ft'),
+            'altitude_initial': (30500.0, 'ft'),
+            'altitude_final': (31000.0, 'ft'),
+            'altitude_bounds': ((30000.0, 41000.0), 'ft'),
+
             'throttle_enforcement': 'boundary_constraint',
-            'time_initial_bounds': ((35.0, 105.0), 'min'),
-            'time_duration_bounds': ((91.5, 274.5), 'min'),
+
+            'time_initial_bounds': ((27.0, 81.0), 'min'),
+            'time_duration_bounds': ((60.0, 350.0), 'min'),
         },
-        'initial_guesses': {'time': ([70, 183], 'min')},
+        'initial_guesses': {
+            'time': ([54.0, 117.0], 'min')
+        },
     },
+
     'descent_1': {
         'subsystem_options': {'core_aerodynamics': {'method': 'tabular',
                                                     'CD0_data': CD0_data,
@@ -200,31 +231,76 @@ phase_info = {
         'user_options': {
             'num_segments': 5,
             'order': 3,
+
+            # Optimization turned OFF
             'mach_optimize': False,
             'mach_polynomial_order': 1,
-            'mach_initial': (0.80, 'unitless'),
-            'mach_final': (0.21, 'unitless'),
-            'mach_bounds': ((0.19, 0.84), 'unitless'),
+            'mach_initial': (0.72, 'unitless'),
+            'mach_final': (0.2, 'unitless'),
+            'mach_bounds': ((0.18, 0.8), 'unitless'),
+
+            # Optimization turned OFF
             'altitude_optimize': False,
             'altitude_polynomial_order': 1,
-            'altitude_initial': (36000.0, 'ft'),
-            'altitude_final': (0.0, 'ft'),
-            'altitude_bounds': ((0.0, 36500.0), 'ft'),
+            'altitude_initial': (31000.0, 'ft'),
+            'altitude_final': (1500.0, 'ft'),
+            'altitude_bounds': ((0.0, 31500.0), 'ft'),
+
             'throttle_enforcement': 'path_constraint',
-            'time_initial_bounds': ((126.5, 379.5), 'min'),
-            'time_duration_bounds': ((25.0, 75.0), 'min'),
+
+            'time_initial_bounds': ((112.5, 337.5), 'min'),
+            'time_duration_bounds': ((26.5, 79.5), 'min'),
         },
-        'initial_guesses': {'time': ([253, 50], 'min')},
+        'initial_guesses': {
+            'time': ([171.0, 54.0], 'min')
+        },
     },
+
+    'hold': {
+        'subsystem_options': {'core_aerodynamics': {'method': 'tabular',
+                                                    'CD0_data': CD0_data,
+                                                    'CDI_data': CDI_data,
+                                                    'structured': False,
+                                                    'connect_training_data': True,}},
+        'user_options': {
+            'num_segments': 3,
+            'order': 2,
+
+            # Optimization turned OFF
+            'mach_optimize': False,
+            'mach_initial': None,
+            'mach_final': None,
+            'mach_bounds': ((0.15, 0.25), 'unitless'),
+
+            # Optimization turned OFF
+            'altitude_optimize': False,
+            'altitude_initial': (1500.0, 'ft'),
+            'altitude_final': (1500.0, 'ft'),
+            'altitude_bounds': ((1000.0, 3000.0), 'ft'),
+
+            'throttle_enforcement': 'path_constraint',
+
+            'time_initial_bounds': ((0.0, 700.0), 'min'),
+            'time_duration_bounds': ((45.0, 45.0), 'min'),
+        },
+        'initial_guesses': {
+            'time': ([225.0, 45.0], 'min')
+        },
+    },
+
     'post_mission': {
         'include_landing': False,
         'constrain_range': True,
-        'target_range': (1600, 'nmi'),
+        'target_range': (1600.0, 'nmi'),
     },
 }
 
 # Load aircraft and options data from user
 # Allow for user overrides here angain
+
+# Attach JetCost as an external post-mission subsystem
+phase_info['post_mission'].setdefault('external_subsystems', [])
+phase_info['post_mission']['external_subsystems'].append(JetCostBuilder())
 
 prob = av.AviaryProblem()
 
@@ -257,11 +333,11 @@ prob.add_driver(optimizer, max_iter=max_iter)
 # Design Variables
 prob.add_design_variables()
 # Aspect Ratio
-prob.model.add_design_var(av.Aircraft.Wing.ASPECT_RATIO, lower=10.0, upper=20.0, ref=12.0)
+prob.model.add_design_var(av.Aircraft.Wing.ASPECT_RATIO, lower=30.0, upper=40.0, ref=36.0)
 # Wing Area
 prob.model.add_design_var(av.Aircraft.Wing.AREA, lower=1000.0, upper=1500.0, ref=1220.0)
 # Wing Sweep
-prob.model.add_design_var(av.Aircraft.Wing.SWEEP, lower=0.0, upper=75.0, ref=20.0)
+prob.model.add_design_var(av.Aircraft.Wing.SWEEP, lower=25.0, upper=45.0, ref=30.0)
 # Taper Ratio
 prob.model.add_design_var(av.Aircraft.Wing.TAPER_RATIO, lower=0.1, upper=0.5, ref=0.26419)
 # Dihedral Angle
@@ -277,6 +353,57 @@ prob.model.add_design_var(av.Aircraft.Fuselage.MAX_WIDTH, lower=10.0, upper=15.0
 
 prob.add_objective()
 prob.setup()
+
+# ===== Cost model economic inputs (non-CSV) =====
+prob.set_val(Aircraft.Cost.LABOR_RATE_MFG, 100.0)
+prob.set_val(Aircraft.Cost.LABOR_FACTOR, 1.0)
+prob.set_val(Aircraft.Cost.LABOR_PROD_FACTOR, 1.0)
+
+prob.set_val(Aircraft.Cost.FUEL_PRICE_PER_GAL, 3.5)
+prob.set_val(Aircraft.Cost.UTILIZATION_ANNUAL, 4000.0)
+prob.set_val(Aircraft.Cost.RESIDUAL_VALUE_FRACTION, 0.15)
+prob.set_val(Aircraft.Cost.DEPRECIATION_YEARS, 20.0)
+
+prob.set_val(Aircraft.Cost.CREW_COST_BASE, 1_000_000.0)
+prob.set_val(Aircraft.Cost.CREW_OVERHEAD_FRACTION, 0.035)
+
+prob.set_val(Aircraft.Cost.STORAGE_PER_MONTH, 25_000.0)
+prob.set_val(Aircraft.Cost.LIABILITY_INSURANCE, 200_000.0)
+prob.set_val(Aircraft.Cost.HULL_INSURANCE_RATE, 0.01)
+
+prob.set_val(Aircraft.Cost.OVERHAUL_RATE, 1.0e-4)
+prob.set_val(Aircraft.Cost.OVERHAUL_INTERVAL_HR, 20_000.0)
+# ================================================
+
+# --- Diagnostic: print initial design variable values and initial model objective ---
+print('\n--- Pre-optimization diagnostics ---')
+try:
+    # run a single model evaluation to get baseline outputs
+    prob.run_model()
+except Exception as e:
+    print('Warning: prob.run_model() failed during pre-optimization check:', e)
+
+def _print_design_state(tag: str = 'state'):
+    print(f"\n== {tag} design variables ==")
+    try:
+        print('Aspect Ratio:', prob.get_val(av.Aircraft.Wing.ASPECT_RATIO))
+        print('Wing Area:', prob.get_val(av.Aircraft.Wing.AREA))
+        print('Wing Sweep:', prob.get_val(av.Aircraft.Wing.SWEEP))
+        print('Taper Ratio:', prob.get_val(av.Aircraft.Wing.TAPER_RATIO))
+        print('Dihedral:', prob.get_val(av.Aircraft.Wing.DIHEDRAL))
+        print('Fuselage Length:', prob.get_val(av.Aircraft.Fuselage.LENGTH))
+    except Exception as e:
+        print('Could not read design vars:', e)
+
+try:
+    fuel_init = prob.get_val(av.Mission.Summary.FUEL_BURNED)
+    print('Initial fuel burn (raw):', fuel_init)
+except Exception:
+    print('Initial fuel burn not available before run or retrieval failed.')
+
+_print_design_state('initial')
+
+print('\nRunning optimization...')
 prob.run_aviary_problem(make_plots=make_plots)
 
 print("\n=== AVIARY GEOMETRY OPTIMIZATION COMPLETE ===\n")
@@ -338,6 +465,52 @@ outputs = {
     "total_fuel_burn [lbm]": prob.get_val(av.Mission.Summary.FUEL_BURNED),
 }
 
+# === Cost Outputs from JetCost subsystem ===
+flyaway_cost = prob.get_val(Aircraft.Cost.FLYAWAY)[0]
+consumer_price = prob.get_val(Aircraft.Cost.CONSUMER_PRICE)[0]
+toc_per_hr = prob.get_val(Aircraft.Cost.TOTAL_COST_PER_HR)[0]
+var_per_hr = prob.get_val(Aircraft.Cost.VAR_TOTAL_PER_HR)[0]
+fixed_annual = prob.get_val(Aircraft.Cost.FIXED_TOTAL_ANNUAL)[0]
+airframe_mfg = prob.get_val(Aircraft.Cost.AIRFRAME_MANUFACTURING)[0]
+engine_total = prob.get_val(Aircraft.Cost.ENGINE_TOTAL)[0]
+direct_mfg = prob.get_val(Aircraft.Cost.DIRECT_MANUFACTURING)[0]
+ga_overhead = prob.get_val(Aircraft.Cost.GA_OVERHEAD)[0]
+total_mfg = prob.get_val(Aircraft.Cost.TOTAL_MANUFACTURING)[0]
+mfg_labor_hrs = prob.get_val(Aircraft.Cost.MANUFACTURING_LABOR_HOURS)[0]
+mfg_labor_cost = prob.get_val(Aircraft.Cost.MANUFACTURING_LABOR)[0]
+
+outputs.update({
+    "flyaway_cost [USD]": float(flyaway_cost),
+    "consumer_price [USD]": float(consumer_price),
+    "total_operating_cost_per_hr [USD/hr]": float(toc_per_hr),
+    "variable_cost_per_hr [USD/hr]": float(var_per_hr),
+    "fixed_cost_annual [USD/yr]": float(fixed_annual),
+    "airframe_mfg_cost [USD]": float(airframe_mfg),
+    "engine_total_cost [USD]": float(engine_total),
+    "direct_mfg_cost [USD]": float(direct_mfg),
+    "ga_overhead [USD]": float(ga_overhead),
+    "total_mfg_cost [USD]": float(total_mfg),
+    "mfg_labor_hours [hr]": float(mfg_labor_hrs),
+    "mfg_labor_cost [USD]": float(mfg_labor_cost),
+})
+
+print("=== REQUIRED OAS STRUCTURAL INPUTS + COST ===")
+for k, v in outputs.items():
+    print(f"{k:35s} : {v}")
+
+print("\n====== COST SUMMARY (JetCost) ======")
+print(f"Flyaway cost (CS_FAF):            {flyaway_cost:,.3f} USD")
+print(f"Consumer price (CP):              {consumer_price:,.3f} USD")
+print(f"Total operating cost (TOC):       {toc_per_hr:,.3f} USD/hr")
+print(f"Variable operating cost per hour: {var_per_hr:,.3f} USD/hr")
+print(f"Fixed operating cost per year:    {fixed_annual:,.3f} USD/year")
+print(f"Manufacturing labor hours:        {mfg_labor_hrs:,.3f} hr")
+print(f"Manufacturing labor cost:         {mfg_labor_cost:,.3f} USD")
+print(f"Airframe manufacturing cost:      {airframe_mfg:,.3f} USD")
+print(f"Engine total cost:                {engine_total:,.3f} USD")
+print(f"Total manufacturing cost:         {total_mfg:,.3f} USD")
+print("====================================\n")
+
 print("=== REQUIRED OAS STRUCTURAL INPUTS ===")
 for k, v in outputs.items():
     print(f"{k:20s} : {v}")
@@ -345,8 +518,8 @@ for k, v in outputs.items():
 print("\nSaved. You can now pass these into your OAS structural optimization script.\n")
 
 # Emissions Estimation
-#from emissions import compute_emissions
-#emissions = compute_emissions(prob, make_plots=True)
+from emissions import compute_emissions
+emissions = compute_emissions(prob, make_plots=True)
 
 # Compute Strucutre
 #from structure import compute_structure
